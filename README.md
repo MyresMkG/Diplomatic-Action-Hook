@@ -6,6 +6,8 @@ DLL 注入实现。
 完整的问题分析（为什么脚本加不了、两道硬墙在哪、逐条证据行号）见
 `stellaris_4.5_diplomatic_action_新增机制分析.md`。
 
+（注：使用deepseek-v4.1-flash编写，harness为Kimi Code）
+
 ---
 
 ## 1. 它解决的两个问题
