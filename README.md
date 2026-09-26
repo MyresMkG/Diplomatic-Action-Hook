@@ -72,8 +72,7 @@ diplo_action_hook_src/
     └── walk_test.cpp             打印某个函数的解码流，排查走偏
 ```
 
-把 DLL 注入游戏的加载器**不在本目录**，见 `..\stellaris_mod_injector_src\`（源码）
-与 `..\stellaris_mod_injector_bin\`（成品，用法见那里的 `使用说明.md`）。
+把 DLL 注入游戏的加载器**不在本目录**：[源码](https://github.com/MyresMkG/Stellaris-Mod-Injector)，[成品](https://github.com/MyresMkG/Stellaris-Mod-Injector/releases)。
 
 编译：
 
