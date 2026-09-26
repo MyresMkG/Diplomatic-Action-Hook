@@ -1,7 +1,7 @@
-# diplo_action_hook —— 源码
+# diplo_action_hook
 
 让群星脚本能够**真正新增**外交行动（`common/diplomatic_actions/` 里的全新条目）的
-DLL 注入实现。编译好的成品在 `D:\学习\diplo_action_hook_dll\`。
+DLL 注入实现。
 
 完整的问题分析（为什么脚本加不了、两道硬墙在哪、逐条证据行号）见
 `stellaris_4.5_diplomatic_action_新增机制分析.md`。
@@ -175,14 +175,3 @@ libstdc++ / MSVC `std::string` 布局差异影响。只有在写日志时才按 
 但界面所用的工厂代码已由 DLL 自检在真实游戏里跑通，见上表最后几行。
 
 ---
-
-## 6. 自定义锚点
-
-如果你想把这套方法用到别的函数上，两个工具就够：
-
-```
-py  tools\resolve_anchor.py <exe> "<字符串>"        # 只看某个字符串被哪些函数引用
-tools\anchor_test.exe <exe> "<字符串>"              # 同上，C++ 版（更快）
-tools\walk_test.exe  <exe> <rva> [条数]             # 打印某函数的解码流，排查走偏
-tools\resolve_test.exe <exe> [期望值...]            # 跑整套解析并断言
-```
