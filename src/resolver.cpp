@@ -449,6 +449,88 @@ void ResolveAIPropose(const anchor::Image& img, Resolved* r) {
   r->ai_propose_failure = "ok";
 }
 
+// Every .pdata function that contains a direct call to |target|. The scan looks
+// at raw bytes rather than at decoded instruction boundaries; a byte pair inside
+// a literal pool could in principle be taken for a call, so the caller only
+// accepts a single, shape-checked candidate.
+std::set<uint32_t> CallerFuncs(const anchor::Image& img, uint32_t target) {
+  std::set<uint32_t> out;
+  const anchor::Section* text = img.section(".text");
+  if (text == nullptr) return out;
+  const uint32_t span = text->vsize < text->rawsize ? text->vsize : text->rawsize;
+  const uint8_t* p = img.At(text->va, span);
+  if (p == nullptr) return out;
+  const std::vector<std::array<uint32_t, 3>>& funcs = img.Functions();
+  size_t cursor = 0;
+  for (uint32_t i = 0; i + 5 <= span; ++i) {
+    if (p[i] != 0xE8) continue;
+    int32_t rel;
+    memcpy(&rel, p + i + 1, 4);
+    const uint32_t at = text->va + i;
+    if (at + 5 + static_cast<uint32_t>(rel) != target) continue;
+    // Call sites come in ascending address order, so the search only ever moves
+    // forward through the .pdata list.
+    while (cursor + 1 < funcs.size() && funcs[cursor][1] <= at) cursor += 1;
+    if (funcs[cursor][0] <= at && at < funcs[cursor][1]) out.insert(funcs[cursor][0]);
+  }
+  return out;
+}
+
+// How many direct calls a function contains. The acceptance scorer is a long
+// per-token table, so this is the cheapest way to tell it apart from a thunk.
+uint32_t DirectCallCount(const anchor::Image& img, uint32_t func) {
+  uint32_t count = 0;
+  for (const Insn& in : Walk(img, func, 4000)) {
+    if (CallTarget(in) != 0) count += 1;
+  }
+  return count;
+}
+
+// `AI_acceptance_base_value` is a plain int in the action type, but the engine
+// reads it only from inside the per-token acceptance table, which can never know
+// a token this DLL invented. Resolving the scorer and the field lets the hook add
+// the value back for those tokens.
+//
+// The chain is narrow: ".ai_acceptance" is referenced by exactly one function
+// (GetScriptedAcceptance, the evaluator of the scripted `ai_acceptance` field)
+// and that function has exactly one caller (GetAIAcceptance). The field offset is
+// the one this build was verified against; game_hooks.cpp additionally checks the
+// value distribution in the database before it trusts the read.
+void ResolveAIAcceptance(const anchor::Image& img, Resolved* r) {
+  r->ai_acceptance_failure = "anchor not found: '.ai_acceptance'";
+  std::vector<anchor::Ref> refs;
+  if (!anchor::ResolveAnchor(img, ".ai_acceptance", &refs, nullptr)) return;
+  r->scripted_acceptance = PickSmallest(img, RefFuncs(refs));
+  if (r->scripted_acceptance == 0) {
+    r->ai_acceptance_failure = "no code references '.ai_acceptance'";
+    return;
+  }
+
+  const std::set<uint32_t> callers = CallerFuncs(img, r->scripted_acceptance);
+  if (callers.size() != 1) {
+    r->ai_acceptance_failure = "the scripted acceptance does not have a single caller";
+    return;
+  }
+  r->get_ai_acceptance = *callers.begin();
+  const uint32_t size = FuncSize(img, r->get_ai_acceptance);
+  if (size == 0 || size > 0x2000) {
+    r->ai_acceptance_failure = "the acceptance scorer is not a normal-sized function";
+    return;
+  }
+  if (DirectCallCount(img, r->get_ai_acceptance) < 8) {
+    r->ai_acceptance_failure =
+        "the acceptance scorer does not look like a per-token table";
+    return;
+  }
+
+  // Verified on 4.5.0 and 4.5.1 (Windows) and identical in the Linux dump: the
+  // type's early members -- name at +0x10, token at +0x50 (both already used by
+  // this hook), prerequisites at +0x58, then this int -- keep their layout, while
+  // everything from the MTTH member onwards is shifted by 0x48 on Windows.
+  r->ai_acceptance_base_offset = 0x78;
+  r->ai_acceptance_failure = "ok";
+}
+
 }  // namespace
 
 void ResolveAll(const anchor::Image& img, Resolved* out) {
@@ -737,6 +819,11 @@ void ResolveAll(const anchor::Image& img, Resolved* out) {
   // Not being able to find it costs the new actions their AI initiative, not
   // their existence, so this step reports rather than fails.
   ResolveAIPropose(img, &r);
+
+  // ---- step 5: the AI's acceptance score (optional) -----------------------
+  // Same rule: `AI_acceptance_base_value` staying inert for new actions is a
+  // missing feature, not a broken hook.
+  ResolveAIAcceptance(img, &r);
 
   r.ok = true;
   r.failure = "ok";

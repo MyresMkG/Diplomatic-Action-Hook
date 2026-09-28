@@ -179,3 +179,44 @@ if base_vtable and slot:
     # the base implementation should be the "return 0" stub
     body = blob(q(base_vtable + slot) - image_base, 16)
     print("  base ShouldAIPropose body:", body.hex(" "))
+
+# ---- 6. AI acceptance chain ---------------------------------------------
+# ".ai_acceptance" -> GetScriptedAcceptance, and its only caller is
+# GetAIAcceptance. `AI_acceptance_base_value` sits at type+0x78 in this layout
+# (same as the Linux dump; the type's members from the MTTH onwards are shifted
+# by 0x48 on Windows, but this early field is not).
+soff = data.find(b".ai_acceptance")
+if soff < 0:
+    print("string '.ai_acceptance': NOT FOUND")
+else:
+    sva2 = off_to_va(soff, image_base, sections)
+    print("string '.ai_acceptance' at RVA 0x%x" % (sva2 - image_base))
+    refs2 = []
+    for k in range(0, len(tb) - 4):
+        disp = struct.unpack_from("<i", tb, k)[0]
+        end_va = image_base + TEXT[1] + k + 4
+        st = k + 4 - 7
+        if st < 0 or tb[st] not in (0x48, 0x4C):
+            continue
+        if tb[st + 1] not in (0x8D, 0x8B) or (tb[st + 2] & 0xC7) != 0x05:
+            continue
+        if end_va + disp == sva2:
+            refs2.append(TEXT[1] + st)
+    for r in refs2:
+        f = find_func(funcs, r)
+        print("  ref rva 0x%x -> func 0x%x (size 0x%x)" % (r, f[0], f[1] - f[0]))
+    if refs2:
+        scripted_acceptance = find_func(funcs, refs2[0])[0]
+        callers = set()
+        for k in range(0, len(tb) - 5):
+            if tb[k] == 0xE8:
+                rel = struct.unpack_from("<i", tb, k + 1)[0]
+                at = TEXT[1] + k
+                if at + 5 + rel == scripted_acceptance:
+                    f = find_func(funcs, at)
+                    callers.add(f[0] if f else at)
+        print("  its callers:", ["0x%x" % c for c in sorted(callers)])
+        print("  ==> GetScriptedAcceptance = 0x%x, GetAIAcceptance = %s" % (
+            scripted_acceptance,
+            ("0x%x" % list(callers)[0]) if len(callers) == 1 else "(not unique!)"))
+print("AI_acceptance_base_value offset = +0x78 (verified on 4.5.0 and 4.5.1)")

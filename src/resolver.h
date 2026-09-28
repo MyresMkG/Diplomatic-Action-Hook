@@ -64,6 +64,18 @@ struct Resolved {
   uint32_t ai_propose_votes = 0;  // stock vtables that agreed on the slot
   const char* ai_propose_failure = "not attempted";
 
+  // The AI's acceptance score. GetAIAcceptance() decides how willing the
+  // recipient is, but its per-token table cannot have a case for a token this
+  // DLL invented, so a new action scores only its scripted `ai_acceptance` field.
+  // The hook adds |ai_acceptance_base_offset|'s int -- the setting
+  // `AI_acceptance_base_value`, which every stock action gets from that table --
+  // for tokens this DLL created. Same rule as above: zero means "not located,
+  // leave the feature out".
+  uint32_t scripted_acceptance = 0;        // GetScriptedAcceptance(action, CString*)
+  uint32_t get_ai_acceptance = 0;          // GetAIAcceptance(action, int, CString*)
+  uint32_t ai_acceptance_base_offset = 0;  // int `AI_acceptance_base_value` in the type
+  const char* ai_acceptance_failure = "not attempted";
+
   // Token-space boundary, read lazily once the lexer exists.
   uint32_t static_token_count = 0;
 };

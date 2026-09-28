@@ -31,6 +31,10 @@ using CopyFn = void(__fastcall*)(void* dst, void* src);
 // action object and reads the rest out of its type, exactly like the stock
 // subclasses call it.
 using ScriptedAIProposeFn = bool(__fastcall*)(const void* self);
+// int GetAIAcceptance(CDiplomaticAction const*, int favors, CString* reasons):
+// the engine's whole acceptance score for a proposal. Third argument is only
+// written to when reasons are collected, so it is treated as opaque.
+using GetAIAcceptanceFn = int(__fastcall*)(const void* action, int favors, const void* reasons);
 
 Resolved g_resolved;
 uintptr_t g_module = 0;
@@ -47,9 +51,11 @@ constexpr uint32_t kMaxVtableSlots = 64;
 
 CreateEmptyActionFn g_orig_create_empty_action = nullptr;
 TypeCtorFn g_orig_type_ctor = nullptr;
+GetAIAcceptanceFn g_orig_get_ai_acceptance = nullptr;
 
 hook::InlineHook g_hook_type_ctor;
 hook::InlineHook g_hook_create_empty_action;
+hook::InlineHook g_hook_get_ai_acceptance;
 
 std::mutex g_mutex;
 // The engine's lexer is not documented as thread safe: hook 1 registers names on
@@ -277,6 +283,57 @@ int __fastcall OurShouldAIPropose(void* self, int /*mode*/) {
   return answer;
 }
 
+// A fabricated `AI_acceptance_base_value` outside this range is far more likely
+// to be a misread field than a number anyone wrote (the base game uses -50).
+constexpr int kAcceptanceBaseLimit = 10000;
+// Set once the database has confirmed that the int at the resolved offset really
+// behaves like `AI_acceptance_base_value`. Until then the hook adds nothing.
+std::atomic<bool> g_acceptance_base_trusted{false};
+
+// `AI_acceptance_base_value` of an action this DLL synthesized, or 0 for
+// everything else. Stock actions are left alone: the engine reads their value
+// from its own per-token acceptance table, and adding it twice would change
+// stock behaviour.
+int OurAcceptanceBase(const void* action) {
+  if (!g_acceptance_base_trusted || action == nullptr || !Readable(action, 8)) return 0;
+  void* type = nullptr;
+  memcpy(&type, static_cast<const uint8_t*>(action) + g_resolved.action_type_offset, 8);
+  if (type == nullptr || !Readable(type, g_resolved.ai_acceptance_base_offset + 4)) {
+    return 0;
+  }
+  int token = 0;
+  memcpy(&token, static_cast<uint8_t*>(type) + g_resolved.type_token_offset, 4);
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_our_tokens.count(token) == 0) return 0;
+  }
+  int base = 0;
+  memcpy(&base, static_cast<uint8_t*>(type) + g_resolved.ai_acceptance_base_offset, 4);
+  if (base < -kAcceptanceBaseLimit || base > kAcceptanceBaseLimit) return 0;
+  return base;
+}
+
+// Detour on GetAIAcceptance, the engine's whole acceptance score for a proposal.
+// Its per-token table cannot have a case for a token this DLL invented, so a new
+// action's score is only its scripted `ai_acceptance` field; the value of the
+// setting `AI_acceptance_base_value` is added back here for those tokens.
+//
+// It is added to the *return value* on purpose: the engine keeps the hardcoded
+// part outside the scripted one, so script `factor`/`mult` modifiers do not scale
+// it. Folding it into the scripted value would change that.
+int __fastcall HookGetAIAcceptance(const void* action, int favors, const void* reasons) {
+  // WillFederationAccept scores federation members through this same entry point;
+  // a nested call must not count the same base twice.
+  static thread_local bool nested = false;
+  if (g_orig_get_ai_acceptance == nullptr) return 0;
+  if (nested) return g_orig_get_ai_acceptance(action, favors, reasons);
+  nested = true;
+  const int value = g_orig_get_ai_acceptance(action, favors, reasons);
+  const int base = OurAcceptanceBase(action);
+  nested = false;
+  return base == 0 ? value : value + base;
+}
+
 template <typename T>
 T At(uint32_t rva) {
   return reinterpret_cast<T>(g_module + rva);
@@ -383,6 +440,62 @@ bool CatchUpExistingTypes() {
   return true;
 }
 
+// The offset of `AI_acceptance_base_value` inside the action type is the one this
+// build's layout was verified against, and it stays distrusted until the database
+// agrees with that: the base game leaves the field at 0 for most actions and uses
+// a small negative number (-50) for the rest, so a wrong offset would show up as
+// a field that is almost never zero, or as values far outside that range. Only
+// stock types are counted -- a mod may write anything into its own action.
+bool CheckAcceptanceBaseField() {
+  if (!g_resolved.ok || g_resolved.db_instance_ptr == 0 ||
+      g_resolved.ai_acceptance_base_offset == 0) {
+    return false;
+  }
+  void* db = nullptr;
+  if (!Readable(At<const void*>(g_resolved.db_instance_ptr), sizeof(void*))) return false;
+  memcpy(&db, At<const void*>(g_resolved.db_instance_ptr), sizeof(void*));
+  if (db == nullptr || !Readable(static_cast<uint8_t*>(db) + 0x50, 0x10)) return false;
+  uint32_t count = 0;
+  void** entries = nullptr;
+  memcpy(&count, static_cast<uint8_t*>(db) + 0x5c, 4);
+  memcpy(&entries, static_cast<uint8_t*>(db) + 0x50, 8);
+  if (count == 0 || count > 100000 || !Readable(entries, count * sizeof(void*))) return false;
+
+  uint32_t inspected = 0;
+  uint32_t zeros = 0;
+  int lowest = 0;
+  int highest = 0;
+  std::set<int> distinct;
+  for (uint32_t i = 0; i < count; ++i) {
+    void* type = entries[i];
+    if (!Readable(type, g_resolved.ai_acceptance_base_offset + 4)) continue;
+    int token = 0;
+    memcpy(&token, static_cast<uint8_t*>(type) + g_resolved.type_token_offset, 4);
+    {
+      std::lock_guard<std::mutex> lock(g_mutex);
+      if (g_our_tokens.count(token) != 0) continue;
+    }
+    int value = 0;
+    memcpy(&value, static_cast<uint8_t*>(type) + g_resolved.ai_acceptance_base_offset, 4);
+    inspected += 1;
+    if (value == 0) {
+      zeros += 1;
+      continue;
+    }
+    distinct.insert(value);
+    if (value < lowest) lowest = value;
+    if (value > highest) highest = value;
+  }
+  if (inspected < 8) return false;
+  const bool plausible = zeros * 2 >= inspected && !distinct.empty() &&
+                         lowest >= -kAcceptanceBaseLimit && highest <= kAcceptanceBaseLimit;
+  Log("AI acceptance base field (+0x%x): %u of %u stock action types stand at 0, "
+      "%zu distinct non-zero value(s) in [%d, %d] -> %s",
+      g_resolved.ai_acceptance_base_offset, zeros, inspected, distinct.size(), lowest,
+      highest, plausible ? "trusted" : "NOT trusted; the setting stays inert");
+  return plausible;
+}
+
 // Exercises the exact call the diplomacy view makes for every action it wants to
 // list: the patched CreateEmptyAction entry. A non-NULL object whose type carries
 // the token we registered is what makes a new action usable, so this is the
@@ -480,6 +593,18 @@ void SelfTestGenericAction() {
             "'<prefix>_DESC', ... with prefix '%s'",
             prefix != nullptr ? prefix : "(null)");
       }
+      // The engine reads `AI_acceptance_base_value` only for tokens it has a
+      // per-token case for, so a new action gets it from the acceptance hook.
+      // Printing what the script asked for is what makes a wrong field offset
+      // obvious instead of silent.
+      int base = 0;
+      if (g_resolved.ai_acceptance_base_offset != 0 &&
+          Readable(static_cast<uint8_t*>(type) + g_resolved.ai_acceptance_base_offset, 4)) {
+        memcpy(&base, static_cast<uint8_t*>(type) + g_resolved.ai_acceptance_base_offset, 4);
+        Log("self-test: AI_acceptance_base_value for token %d reads %d (%s)", token, base,
+            g_acceptance_base_trusted ? "counted by the acceptance hook"
+                                      : "ignored -- the field check did not pass");
+      }
     } else {
       Log("self-test: FAILED, token %d produced an object whose type token is %d",
           token, type_token);
@@ -503,6 +628,10 @@ DWORD WINAPI CatchUpWorker(void*) {
     const bool saw_db = CatchUpExistingTypes();
     if (saw_db && verified_at < 0) {
       verified_at = attempt;
+      // Trust the acceptance base field only after the database has shown that the
+      // int at the resolved offset behaves like that setting; the self-test below
+      // then reports the value it sees per new action.
+      g_acceptance_base_trusted = CheckAcceptanceBaseField();
       SelfTestGenericAction();
     }
     if (verified_at >= 0) {
@@ -575,6 +704,17 @@ bool ResolveOnly() {
   } else {
     Log("  AI propose gate                              not found (%s)",
         g_resolved.ai_propose_failure);
+  }
+  if (g_resolved.get_ai_acceptance != 0) {
+    Log("  GetScriptedAcceptance                        rva 0x%08x",
+        g_resolved.scripted_acceptance);
+    Log("  GetAIAcceptance                              rva 0x%08x",
+        g_resolved.get_ai_acceptance);
+    Log("  AI_acceptance_base_value field               +0x%x (verified layout, the "
+        "database re-checks it)", g_resolved.ai_acceptance_base_offset);
+  } else {
+    Log("  AI acceptance scorer                         not found (%s)",
+        g_resolved.ai_acceptance_failure);
   }
   Log("  sizeof(CDiplomaticAction) = 0x%x, token field +0x%x, type field +0x%x",
       g_resolved.action_size, g_resolved.type_token_offset, g_resolved.action_type_offset);
@@ -673,6 +813,31 @@ bool InstallHooks() {
     }
   }
 
+  // Hook 3 is independent of the vtable: it only needs the acceptance scorer and
+  // the field offset, and it stays a no-op for stock tokens. Without it
+  // `AI_acceptance_base_value` would keep doing nothing for a new action, which is
+  // what the setting is for.
+  bool acceptance_ready = false;
+  if (g_resolved.get_ai_acceptance != 0 && g_resolved.scripted_acceptance != 0 &&
+      g_resolved.ai_acceptance_base_offset != 0) {
+    reason = "";
+    if (!g_hook_get_ai_acceptance.Install(At<void*>(g_resolved.get_ai_acceptance),
+                                          reinterpret_cast<void*>(&HookGetAIAcceptance),
+                                          &reason)) {
+      Log("WARNING: could not hook the AI acceptance scorer: %s", reason);
+    } else {
+      g_orig_get_ai_acceptance =
+          reinterpret_cast<GetAIAcceptanceFn>(g_hook_get_ai_acceptance.trampoline());
+      acceptance_ready = true;
+      Log("hook 3 installed (stole %zu prologue bytes): AI_acceptance_base_value now "
+          "counts for new actions", g_hook_get_ai_acceptance.stolen());
+    }
+  } else {
+    Log("WARNING: the AI acceptance scorer was not located (%s); "
+        "AI_acceptance_base_value stays inert for new actions",
+        g_resolved.ai_acceptance_failure);
+  }
+
   // Anything loaded before hook 1 existed gets repaired in the background, so the
   // result does not depend on how early the injection happened. That repair is
   // hook 1's work, which is why it also runs when hook 2 could not be installed.
@@ -681,6 +846,9 @@ bool InstallHooks() {
   if (factory_ready) {
     Log("ready -- define 'action_<your name> = { ... }' under "
         "common/diplomatic_actions/ and it will load as a real diplomatic action");
+    Log("AI features: propose gate %s, acceptance base %s",
+        g_resolved.ai_propose_slot != 0 ? "on" : "off",
+        acceptance_ready ? "on (checked against the database during load)" : "off");
   } else {
     Log("partial -- action names get real tokens, but no action object will be "
         "built for them");

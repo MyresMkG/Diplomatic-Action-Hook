@@ -20,6 +20,15 @@
 //     never proposed by an AI empire. The slot is pointed at the engine's own
 //     CDiplomaticAction::ScriptedShouldAIPropose, which evaluates the action's
 //     `should_ai_propose` block -- the same call every stock subclass makes.
+//
+// plus one detour that gives the synthesized action the acceptance value the
+// engine keeps in a per-token table for its own actions:
+//
+//  4. GetAIAcceptance(CDiplomaticAction const*, int, CString*)
+//     For a token the engine has no case for, the score is only the scripted
+//     `ai_acceptance` field. `AI_acceptance_base_value` -- which every stock
+//     action reads from that table -- is added to the returned score here, and
+//     only for tokens this DLL created.
 #pragma once
 
 namespace diplo {

@@ -28,7 +28,8 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     fprintf(stderr,
             "usage: %s <stellaris.exe> [type_ctor add_dyn lexer view helper factory "
-            "alloc ctor vtable size ai_propose gate_slot]\n",
+            "alloc ctor vtable size ai_propose gate_slot scripted_acceptance scorer "
+            "acceptance_base_offset]\n",
             argv[0]);
     return 2;
   }
@@ -46,8 +47,9 @@ int main(int argc, char** argv) {
   printf("resolved=%d failure=%s\n", r.ok ? 1 : 0, r.failure);
   if (!r.ok) return 1;
 
-  const char* e[12] = {"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"};
-  for (int i = 0; i < 12 && i + 2 < argc; ++i) e[i] = argv[i + 2];
+  const char* e[15] = {"-", "-", "-", "-", "-", "-", "-", "-", "-", "-",
+                       "-", "-", "-", "-", "-"};
+  for (int i = 0; i < 15 && i + 2 < argc; ++i) e[i] = argv[i + 2];
 
   int bad = 0;
   bad += Check("CDiplomaticActionType constructor", r.type_ctor, e[0]);
@@ -66,9 +68,13 @@ int main(int argc, char** argv) {
   }
   bad += Check("CDiplomaticAction::ScriptedShouldAIPropose", r.scripted_ai_propose, e[10]);
   bad += Check("ShouldAIPropose vtable slot", r.ai_propose_slot, e[11]);
+  bad += Check("GetScriptedAcceptance", r.scripted_acceptance, e[12]);
+  bad += Check("GetAIAcceptance", r.get_ai_acceptance, e[13]);
+  bad += Check("AI_acceptance_base_value offset", r.ai_acceptance_base_offset, e[14]);
   printf("  %-44s %u stock vtables agreed\n", "AI propose gate agreement",
          r.ai_propose_votes);
   printf("  %-44s %s\n", "AI propose gate status", r.ai_propose_failure);
+  printf("  %-44s %s\n", "AI acceptance status", r.ai_acceptance_failure);
   printf("  %-44s 0x%08x\n", "action type DB pointer variable", r.db_instance_ptr);
   printf("  %-44s 0x%08x (%u slots: 0x%x, 0x%x)\n", "_purecall stub", r.purecall,
          r.pure_slot_count, r.pure_slots[0], r.pure_slots[1]);
