@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <set>
@@ -26,6 +27,10 @@ using LexerAccessorFn = void*(__fastcall*)();
 using AllocFn = void*(__fastcall*)(size_t size);
 using BaseCtorFn = void*(__fastcall*)(void* self, int token);
 using CopyFn = void(__fastcall*)(void* dst, void* src);
+// bool in, AL out: CDiplomaticAction::ScriptedShouldAIPropose() takes only the
+// action object and reads the rest out of its type, exactly like the stock
+// subclasses call it.
+using ScriptedAIProposeFn = bool(__fastcall*)(const void* self);
 
 Resolved g_resolved;
 uintptr_t g_module = 0;
@@ -34,6 +39,7 @@ AddDynamicTokenFn g_add_dynamic_token = nullptr;
 AllocFn g_alloc = nullptr;
 BaseCtorFn g_base_ctor = nullptr;
 CopyFn g_copy_fn = nullptr;
+ScriptedAIProposeFn g_scripted_ai_propose = nullptr;
 
 // Defined below; needed by the factory detour.
 extern uintptr_t g_our_vtable[];
@@ -242,6 +248,35 @@ void* __fastcall OurClone(void* self) {
   return memory;
 }
 
+// The AI's "should I propose this?" slot. The base class answers a flat 0 there
+// -- that is the only reason a synthesized action is never proposed by an AI
+// empire -- so this runs the engine's own ScriptedShouldAIPropose, the same call
+// every stock subclass makes, and the answer comes out of the action's
+// `should_ai_propose` block. Nothing else about the object changes.
+//
+// Returning int rather than bool keeps the upper bits of eax defined as well:
+// the base implementation is a bare `xor al, al`, so callers only ever read AL,
+// but there is no reason to hand them a partially undefined register.
+int __fastcall OurShouldAIPropose(void* self, int /*mode*/) {
+  if (self == nullptr || g_scripted_ai_propose == nullptr) return 0;
+  if (!Readable(self, 8)) return 0;
+  const int answer = g_scripted_ai_propose(self) ? 1 : 0;
+  // The AI asks this on every evaluation pass, so only the first few answers are
+  // written out: enough to see that the action's script is being consulted.
+  static std::atomic<int> logged{0};
+  if (logged.fetch_add(1) < 4) {
+    int token = -1;
+    void* type = nullptr;
+    memcpy(&type, static_cast<uint8_t*>(self) + g_resolved.action_type_offset, 8);
+    if (Readable(type, g_resolved.type_token_offset + 4)) {
+      memcpy(&token, static_cast<uint8_t*>(type) + g_resolved.type_token_offset, 4);
+    }
+    Log("AI propose check on token %d: should_ai_propose answers %s", token,
+        answer != 0 ? "yes" : "no");
+  }
+  return answer;
+}
+
 template <typename T>
 T At(uint32_t rva) {
   return reinterpret_cast<T>(g_module + rva);
@@ -416,6 +451,22 @@ void SelfTestGenericAction() {
       }
       Log("self-test: called the diplomacy view's own check slots (%d/2) on the "
           "new action without incident", slot_ok);
+      // The AI gate is not called here -- the object has no actor or recipient
+      // yet, and running the script's triggers against null countries would only
+      // produce noise in error.log -- but which implementation sits in the slot
+      // is checkable, and that is the whole difference between "the AI ignores
+      // this action" and "the AI reads its should_ai_propose".
+      if (g_resolved.ai_propose_slot != 0 &&
+          Readable(vtbl + g_resolved.ai_propose_slot, 8)) {
+        uint64_t gate = 0;
+        memcpy(&gate, vtbl + g_resolved.ai_propose_slot, 8);
+        Log("self-test: AI propose gate (+0x%x) is %s",
+            g_resolved.ai_propose_slot,
+            gate == reinterpret_cast<uint64_t>(&OurShouldAIPropose)
+                ? "the scripted implementation, so an AI empire can propose this "
+                  "action itself"
+                : "NOT the scripted implementation; the AI will keep ignoring it");
+      }
       // Slot +0x70 supplies the localisation-key prefix the view will look the
       // action's text up under; showing it makes a missing translation obvious.
       using NameFn = const char*(__fastcall*)(void*);
@@ -516,6 +567,15 @@ bool ResolveOnly() {
   Log("  CDiplomaticAction vtable                     rva 0x%08x", g_resolved.base_vtable);
   Log("  action type database pointer variable        rva 0x%08x",
       g_resolved.db_instance_ptr);
+  if (g_resolved.ai_propose_slot != 0) {
+    Log("  CDiplomaticAction::ScriptedShouldAIPropose   rva 0x%08x",
+        g_resolved.scripted_ai_propose);
+    Log("  AI propose gate (ShouldAIPropose slot)       +0x%x, agreed by %u stock "
+        "action vtables", g_resolved.ai_propose_slot, g_resolved.ai_propose_votes);
+  } else {
+    Log("  AI propose gate                              not found (%s)",
+        g_resolved.ai_propose_failure);
+  }
   Log("  sizeof(CDiplomaticAction) = 0x%x, token field +0x%x, type field +0x%x",
       g_resolved.action_size, g_resolved.type_token_offset, g_resolved.action_type_offset);
   return true;
@@ -564,6 +624,23 @@ bool InstallHooks() {
     if (g_copy_fn == nullptr) {
       Log("WARNING: the engine's action copy helper was not located; cloning a "
           "new action will return nothing");
+    }
+    // The base class answers the AI's proposal question with a flat 0, which is
+    // what keeps every unspecialised action out of the AI's hands. Pointing that
+    // one slot at the scripted answer is what gives a new action AI initiative;
+    // a build where the slot could not be pinned down keeps the old behaviour
+    // instead of guessing.
+    if (g_resolved.ai_propose_slot != 0 && g_resolved.scripted_ai_propose != 0 &&
+        g_resolved.ai_propose_slot / 8 < kMaxVtableSlots) {
+      g_scripted_ai_propose = At<ScriptedAIProposeFn>(g_resolved.scripted_ai_propose);
+      g_our_vtable[g_resolved.ai_propose_slot / 8] =
+          reinterpret_cast<uintptr_t>(&OurShouldAIPropose);
+      Log("AI propose gate wired: vtable slot +0x%x now answers from the action's "
+          "script (should_ai_propose), the same way %u stock action classes do",
+          g_resolved.ai_propose_slot, g_resolved.ai_propose_votes);
+    } else {
+      Log("WARNING: the AI propose gate was not located (%s); new actions stay "
+          "player-initiated only", g_resolved.ai_propose_failure);
     }
     vtable_ready = true;
   }

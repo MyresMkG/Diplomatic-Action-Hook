@@ -1,4 +1,4 @@
-// The two detours that make script-defined diplomatic actions usable.
+// The detours that make script-defined diplomatic actions usable.
 //
 //  1. CDiplomaticActionType::CDiplomaticActionType(int, CString const&)
 //     The token of a scripted action is not derived from its name -- it is
@@ -12,6 +12,14 @@
 //     plain CDiplomaticAction is constructed instead; its behaviour
 //     (potential / possible / proposable / on_propose / on_accept / on_decline)
 //     is entirely script-driven, so the new action works like a native one.
+//
+// and, on the object that factory hands out, one synthesized virtual:
+//
+//  3. ShouldAIPropose(int) -- vtable slot resolved at runtime
+//     The base implementation returns a flat 0, so an unspecialised action is
+//     never proposed by an AI empire. The slot is pointed at the engine's own
+//     CDiplomaticAction::ScriptedShouldAIPropose, which evaluates the action's
+//     `should_ai_propose` block -- the same call every stock subclass makes.
 #pragma once
 
 namespace diplo {

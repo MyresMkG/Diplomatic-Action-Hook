@@ -26,7 +26,9 @@ static int Check(const char* name, uint32_t got, const char* expect) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    fprintf(stderr, "usage: %s <stellaris.exe> [type_ctor add_dyn lexer view helper factory alloc ctor vtable size]\n",
+    fprintf(stderr,
+            "usage: %s <stellaris.exe> [type_ctor add_dyn lexer view helper factory "
+            "alloc ctor vtable size ai_propose gate_slot]\n",
             argv[0]);
     return 2;
   }
@@ -44,8 +46,8 @@ int main(int argc, char** argv) {
   printf("resolved=%d failure=%s\n", r.ok ? 1 : 0, r.failure);
   if (!r.ok) return 1;
 
-  const char* e[10] = {"-", "-", "-", "-", "-", "-", "-", "-", "-", "-"};
-  for (int i = 0; i < 10 && i + 2 < argc; ++i) e[i] = argv[i + 2];
+  const char* e[12] = {"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"};
+  for (int i = 0; i < 12 && i + 2 < argc; ++i) e[i] = argv[i + 2];
 
   int bad = 0;
   bad += Check("CDiplomaticActionType constructor", r.type_ctor, e[0]);
@@ -62,6 +64,11 @@ int main(int argc, char** argv) {
   } else {
     bad += Check("sizeof(CDiplomaticAction)", r.action_size, e[9]);
   }
+  bad += Check("CDiplomaticAction::ScriptedShouldAIPropose", r.scripted_ai_propose, e[10]);
+  bad += Check("ShouldAIPropose vtable slot", r.ai_propose_slot, e[11]);
+  printf("  %-44s %u stock vtables agreed\n", "AI propose gate agreement",
+         r.ai_propose_votes);
+  printf("  %-44s %s\n", "AI propose gate status", r.ai_propose_failure);
   printf("  %-44s 0x%08x\n", "action type DB pointer variable", r.db_instance_ptr);
   printf("  %-44s 0x%08x (%u slots: 0x%x, 0x%x)\n", "_purecall stub", r.purecall,
          r.pure_slot_count, r.pure_slots[0], r.pure_slots[1]);

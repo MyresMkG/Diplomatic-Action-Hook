@@ -436,7 +436,7 @@ Diplomatic action is missing token:
 | 限制 | 说明 | 能否绕过 |
 | --- | --- | --- |
 | 新行动没有专用 C++ 子类 | `CreateEmptyAction` 里贸易、宣战、和平、联邦投票等各自有专门的类，行为不只在脚本里 | 不能。新行动只能用基类行为（脚本驱动的那套） |
-| AI 默认不会主动提议 | 基类 `CDiplomaticAction::ShouldAIPropose(int)` 直接 `return 0`（2337135-2337141）；专用子类才覆写它去调 `ScriptedShouldAIPropose`（2334821） | 可以：自建一张虚表，把 `ShouldAIPropose` 那一槽换成自己的函数，内部调用游戏的 `ScriptedShouldAIPropose`（对应脚本里的 `should_ai_propose`） |
+| AI 默认不会主动提议 | 基类 `CDiplomaticAction::ShouldAIPropose(int)` 直接 `return 0`（2337135-2337141）；专用子类才覆写它去调 `ScriptedShouldAIPropose`（2334821） | **已由 `diplo_action_hook` 实现**：自建虚表，把 `ShouldAIPropose` 那一槽（Windows 4.5.x 上是 `+0x60`）换成自己的函数，内部调用游戏的 `ScriptedShouldAIPropose`（对应脚本里的 `should_ai_propose`）。槽偏移不写死：工厂派发里的 69 张原版虚表有 55 张在该槽调用同一个函数，基类那一槽则是 `xor al,al; ret` 的桩，两者一致才装 |
 | 动态 token 的 id 是运行时分配的 | `id = 动态数 + 静态数 + 1`，取决于**注册顺序**。存档里写的是 token id | 需要保证注册顺序稳定（例如固定时点、按名字排序注册），否则读旧档会错位 |
 | 多人游戏 | 动态 token 会改变词的数值，可能与对端/校验和不一致 | 未验证；单机无此问题 |
 | 纯 UI 细节 | 图标 / 音效 / 本地化需要 mod 自己提供；`icon`、`sound` 是脚本里指定的 | mod 侧解决 |
@@ -471,10 +471,19 @@ Diplomatic action is missing token:
 | `operator new` | `0x020213e8` | `0x020208c8` | ✅ `CreateEmptyAction` 里 `mov ecx, <类大小>; call` 的目标 |
 | 词法器单例访问函数 | `0x01bb5650` | `0x01bb4b30` | ✅ 构造函数与 `AddDynamicToken` 都调用它，可互为印证 |
 | `sizeof(CDiplomaticAction)` | `0x50` | `0x50` | ✅ 与"无成员子类"（token `0x3e5c`/`0x3e5d`）的分配大小一致 |
+| `CDiplomaticAction::ScriptedShouldAIPropose()` | `0x00943890` | `0x009435e0` | ✅ 一致：拼 `"diplomatic_action." + <类型名> + ".should_ai_propose"`，读 `type+0x568` 的 MTTH，作用域是对象 `+0x20`（root/发起方）与 `+0x24`（from/接收方），最后 `0 < factor` |
+| `ShouldAIPropose` 的虚表槽（**新**） | `+0x60` | `+0x60` | ✅ 由投票推出：工厂派发里 69 张具体虚表，**55 张**在 `+0x60` 放着"会调用 `ScriptedShouldAIPropose` 的函数"（第二名只有 1 票）；基类虚表同一槽是 `32 c0 c3`（`xor al,al; ret`）。AI 决策函数（`0xb8a1a0`）在这条链上依次问 `+0x58` / `+0x60` / `+0x68`，`+0x60` 那一次带一个 `int` 参数、结果 `test al,al` 决定要不要生成提议 |
 
 补充确认的布局：`CString = {vtable; data@+0x10; size@+0x20; capacity@+0x28}`；
 `CDiplomaticActionType` 在 Windows 版是 `0x628` 字节（dump 里是 `0x5e0`）。
 另外，原版有 **64 个 token** 在工厂里走的就是通用构造函数，这说明"通用类足以工作"不是特例。
+
+> **对下面证据表里 `IsSelectable → +0x60` 那一条的更正**：那是 Ghidra 在
+> "Could not recover jumptable" 的函数里把跳转表的一个分支误报成了虚表调用。
+> 实际证据都指向 `+0x60` 是 `ShouldAIPropose`：`+0x60` 的 55 个实现体里调用的正是
+> `ScriptedShouldAIPropose`（读脚本的 `should_ai_propose`）；外交视图
+> `ShowDiplomaticActions` 用的是 `+0x50` / `+0x70` / `+0x78`，**从不调用 `+0x60`**；
+> 而 AI 决策函数在这条链上正好问 `+0x58` / `+0x60` / `+0x68`。
 
 ### 8.3 结论
 
@@ -509,6 +518,20 @@ Diplomatic action is missing token:
 | `catch-up: scanned 69 action types` | 原版 `00_actions.txt` 里 68 个唯一 `action_*` 定义 + 测试模组 1 个 = 69，数量吻合 |
 | `self-test: OK ... type confirmed` | 第 3 节的墙也被补上了：外交界面调用的那条工厂路径（`CreateDiplomaticAction` → `CreateEmptyAction`）确实为新 token 造出了对象，且对象里的类型 token 对得上 |
 | `error.log` 中 `missing token` 出现 **0 次** | 第 2.2 节那条告警消失了，这正是"原来加不了"的直接症状 |
+| `AI propose gate wired: vtable slot +0x60 ...` + `self-test: AI propose gate (+0x60) is the scripted implementation ...` | 第 7.3 节里"AI 默认不会主动提议"那条限制也补上了：新对象的虚表那一槽已指向 DLL 的实现，AI 问到的答案从此来自脚本里的 `should_ai_propose` |
+
+装好这一版之后又跑过一次真实游戏（4.5.1 + 两个新行动），日志原文（节选）：
+
+```
+[     1.282]   CDiplomaticAction::ScriptedShouldAIPropose   rva 0x00943890
+[     1.282]   AI propose gate (ShouldAIPropose slot)       +0x60, agreed by 55 stock action vtables
+[     1.282] AI propose gate wired: vtable slot +0x60 now answers from the action's script (should_ai_propose), the same way 55 stock action classes do
+[    67.047] registered keyword 'action_cntr_destruction' -> token 66921 (0x10569)
+[    67.047] registered keyword 'action_hook_greeting' -> token 66922 (0x1056a)
+[    67.594] catch-up: scanned 70 action types, repaired 0, already registered 2
+[    67.594] self-test: AI propose gate (+0x60) is the scripted implementation, so an AI empire can propose this action itself
+[    67.594] self-test: 2 of 2 newly registered action(s) verified through the factory the diplomacy view uses
+```
 
 另外实测确认了两件工程上的事：
 
@@ -517,8 +540,11 @@ Diplomatic action is missing token:
 2. 时序不再敏感：钩子早于数据加载时由构造函数钩子覆盖，晚于加载时由**回扫数据库**补上
    （第 7.3 节提到的动态 token 分配顺序问题因此不再依赖注入时机）。
 
-仍未验证的是"在外交界面里看到按钮并点击生效"这一步——那需要实际打开外交窗口操作。
-但 `self-test` 已经跑过界面所用的同一段工厂代码，剩下的只是 UI 是否把它列出来。
+仍未验证的是两件需要"真的玩一局"的事：在外交界面里看到按钮并点击生效、
+以及 AI 帝国真的把新行动提出来。前者 DLL 自检已经跑过界面所用的同一段工厂代码；
+后者自检只能确认"那一槽确实是脚本实现"，AI 真的来问时日志里会多出
+`AI propose check on token N: should_ai_propose answers yes/no`，测试模组的 `on_accept`
+里也写了 `log =`，AI 提议被接受时 `logs/game.log` 里会留下痕迹。
 
 ---
 
@@ -606,7 +632,7 @@ self-test: localisation keys will be looked up as '<prefix>_TITLE', '<prefix>_DE
 | `CreateEmptyAction` 巨型 switch，未知 token 返回 NULL | 2628904-2629501（默认置空 2628966；提前 return 2628978/2628998/2629014） |
 | `0x3e5c` / `0x3e5d` 造裸 `CDiplomaticAction` | 2628997-2629011 |
 | `CDiplomacyView::ShowDiplomaticActions` 遍历整个 DB | 3922161-3922376（循环 3922229-3922294） |
-| `CDiplomaticAction::IsSelectable` → 虚表 `+0x60` | 2333278-2333285 |
+| `CDiplomaticAction::IsSelectable` → 虚表 `+0x60` | 2333278-2333285（**这条是 Ghidra 在跳转表函数里的误报**，见 8.2 节更正：`+0x60` 是 `ShouldAIPropose`） |
 | `CDiplomaticAction::IsPotential` → type 的脚本触发器 | 2333910-2333979 |
 | `CDiplomaticAction::IsPossible` | 2333987-2334005 |
 | `CDiplomaticAction` 全套脚本驱动虚函数 | 2333904-2335987 |

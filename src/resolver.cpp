@@ -287,6 +287,168 @@ uint32_t PickSmallest(const anchor::Image& img, std::vector<uint32_t> funcs) {
   return funcs[0];
 }
 
+// Start of the .pdata range that contains |rva|. The engine's factory is called
+// through a mid-function entry point on some builds, and every function here
+// that walks a function body is keyed on the recorded start.
+uint32_t ContainingFuncStart(const anchor::Image& img, uint32_t rva) {
+  for (const std::array<uint32_t, 3>& f : img.Functions()) {
+    if (rva >= f[0] && rva < f[1]) return f[0];
+    if (f[0] > rva) break;
+  }
+  return 0;
+}
+
+// True when the code at |rva| contains a direct call or jump to |target|. A
+// vtable slot may point into the middle of a shared code block -- the compiler
+// merges identical thunks -- so instructions are decoded directly here instead
+// of through Walk, which insists on a .pdata function entry.
+bool ReferencesCode(const anchor::Image& img, uint32_t rva, uint32_t target,
+                    uint32_t limit = 0x200) {
+  uint32_t cur = rva;
+  const uint32_t end = rva + limit;
+  while (cur < end) {
+    const uint8_t* p = img.At(cur, 15);
+    if (p == nullptr) return false;
+    const size_t len = lde::DecodeLength(p);
+    if (len == 0) {
+      cur += 1;
+      continue;
+    }
+    if (len == 5 && (p[0] == 0xE8 || p[0] == 0xE9)) {
+      int32_t rel;
+      memcpy(&rel, p + 1, 4);
+      if (cur + 5 + static_cast<uint32_t>(rel) == target) return true;
+    }
+    cur += static_cast<uint32_t>(len);
+  }
+  return false;
+}
+
+// True when the function at |rva| is one of the compiler's bare "return 0"
+// stubs, e.g. `xor al, al; ret`. The base implementation of the AI gate is one
+// of those, and finding one at the derived slot's offset is what confirms that
+// the offset really is the gate rather than code that merely mentions it.
+bool LooksLikeReturnZeroStub(const anchor::Image& img, uint32_t rva) {
+  uint32_t cur = rva;
+  const uint32_t end = rva + 0x20;
+  bool zeroes_accumulator = false;
+  while (cur < end) {
+    const uint8_t* p = img.At(cur, 15);
+    if (p == nullptr) return false;
+    const size_t len = lde::DecodeLength(p);
+    if (len == 0) return false;
+    if (p[0] == 0xC2 || p[0] == 0xC3) return zeroes_accumulator;
+    if (p[0] == 0xE8 || p[0] == 0xE9 || p[0] == 0xEB || p[0] == 0xFF || p[0] == 0xCC) {
+      return false;  // a call, a jump or int3: not a one-line answer
+    }
+    if ((p[0] == 0x30 || p[0] == 0x31 || p[0] == 0x32 || p[0] == 0x33) && len == 2 &&
+        p[1] == 0xC0) {
+      zeroes_accumulator = true;  // xor al/eax, al/eax
+    }
+    if (p[0] == 0xB0 && len == 2 && p[1] == 0x00) zeroes_accumulator = true;  // mov al,0
+    if (p[0] == 0xB8 && len == 5) {
+      int32_t value;
+      memcpy(&value, p + 1, 4);
+      if (value == 0) zeroes_accumulator = true;  // mov eax,0
+    }
+    cur += static_cast<uint32_t>(len);
+  }
+  return false;
+}
+
+// The AI asks every candidate action whether it wants to propose itself, through
+// one vtable slot; the base class answers a flat 0 there, which is why a
+// synthesized action is only ever player-initiated. Neither the slot offset nor
+// the engine's scripted gate is documented, so both are derived from the stock
+// classes the engine itself builds:
+//
+//   * ScriptedShouldAIPropose is the function that references the localisation
+//     key fragment ".should_ai_propose";
+//   * the gate's slot is the offset at which the concrete action vtables the
+//     per-token factory installs agree on holding a function that calls it;
+//   * the base vtable's slot at that offset is a bare "return 0" stub.
+//
+// Anything less than that agreement leaves |ai_propose_slot| at 0, and the hook
+// then keeps the feature out rather than guessing.
+void ResolveAIPropose(const anchor::Image& img, Resolved* r) {
+  std::vector<anchor::Ref> refs;
+  if (!anchor::ResolveAnchor(img, ".should_ai_propose", &refs, nullptr)) {
+    r->ai_propose_failure = "anchor not found: '.should_ai_propose'";
+    return;
+  }
+  r->scripted_ai_propose = PickSmallest(img, RefFuncs(refs));
+  if (r->scripted_ai_propose == 0) {
+    r->ai_propose_failure = "no code references '.should_ai_propose'";
+    return;
+  }
+
+  std::vector<uint32_t> vtables = FindConcreteVtables(img, r->create_empty_action);
+  if (vtables.size() < 8) {
+    const uint32_t enclosing = ContainingFuncStart(img, r->create_empty_action);
+    if (enclosing != 0 && enclosing != r->create_empty_action) {
+      vtables = FindConcreteVtables(img, enclosing);
+    }
+  }
+  if (vtables.size() < 8) {
+    r->ai_propose_failure = "too few concrete action vtables to derive the AI gate";
+    return;
+  }
+
+  std::map<uint32_t, uint32_t> votes;  // slot offset -> vtables that gate on the script
+  for (uint32_t vtable : vtables) {
+    for (uint32_t off = 0; off < 0x100; off += 8) {
+      const uint8_t* slot = img.At(vtable + off, 8);
+      if (slot == nullptr) break;
+      uint64_t value = 0;
+      memcpy(&value, slot, 8);
+      if (value < img.image_base()) continue;
+      const uint32_t fn = static_cast<uint32_t>(value - img.image_base());
+      if (img.section_containing(fn) == nullptr) continue;
+      if (ReferencesCode(img, fn, r->scripted_ai_propose)) votes[off] += 1;
+    }
+  }
+  uint32_t best = 0;
+  uint32_t best_votes = 0;
+  uint32_t runner_up = 0;
+  for (const auto& kv : votes) {
+    if (kv.second > best_votes) {
+      runner_up = best_votes;
+      best_votes = kv.second;
+      best = kv.first;
+    } else if (kv.second > runner_up) {
+      runner_up = kv.second;
+    }
+  }
+  if (best_votes < 5 || best_votes < runner_up * 2) {
+    r->ai_propose_failure = "the stock action vtables do not agree on the AI gate slot";
+    return;
+  }
+  for (uint32_t i = 0; i < r->pure_slot_count; ++i) {
+    if (r->pure_slots[i] == best) {
+      r->ai_propose_failure = "the agreed slot is a pure virtual of the base class";
+      return;
+    }
+  }
+
+  const uint8_t* slot = img.At(r->base_vtable + best, 8);
+  uint64_t value = 0;
+  if (slot == nullptr) {
+    r->ai_propose_failure = "the base vtable has no slot at the agreed offset";
+    return;
+  }
+  memcpy(&value, slot, 8);
+  if (value < img.image_base() ||
+      !LooksLikeReturnZeroStub(img, static_cast<uint32_t>(value - img.image_base()))) {
+    r->ai_propose_failure =
+        "the base class does not answer the agreed slot with a 'return 0' stub";
+    return;
+  }
+
+  r->ai_propose_slot = best;
+  r->ai_propose_votes = best_votes;
+  r->ai_propose_failure = "ok";
+}
+
 }  // namespace
 
 void ResolveAll(const anchor::Image& img, Resolved* out) {
@@ -570,6 +732,11 @@ void ResolveAll(const anchor::Image& img, Resolved* out) {
       return;
     }
   }
+
+  // ---- step 4: the AI's propose gate (optional) ---------------------------
+  // Not being able to find it costs the new actions their AI initiative, not
+  // their existence, so this step reports rather than fails.
+  ResolveAIPropose(img, &r);
 
   r.ok = true;
   r.failure = "ok";

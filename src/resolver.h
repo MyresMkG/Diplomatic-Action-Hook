@@ -51,6 +51,19 @@ struct Resolved {
   // concrete class's clone virtual, so the synthesized class can clone too.
   uint32_t copy_fn = 0;
 
+  // The AI's "do you want to propose this?" gate. The base class answers 0 for
+  // every action it is not specialised for, which is why a synthesized action is
+  // only ever player-initiated. |scripted_ai_propose| is the engine's own
+  // CDiplomaticAction::ScriptedShouldAIPropose(), i.e. the function that
+  // evaluates the action's `should_ai_propose` mean-time-to-happen;
+  // |ai_propose_slot| is the vtable offset the AI asks the question through.
+  // Both stay 0 -- and the hook then leaves the feature out -- when they cannot
+  // be derived with confidence; |ai_propose_failure| says why.
+  uint32_t scripted_ai_propose = 0;
+  uint32_t ai_propose_slot = 0;
+  uint32_t ai_propose_votes = 0;  // stock vtables that agreed on the slot
+  const char* ai_propose_failure = "not attempted";
+
   // Token-space boundary, read lazily once the lexer exists.
   uint32_t static_token_count = 0;
 };
