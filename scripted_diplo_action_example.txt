@@ -1,0 +1,64 @@
+# Variables:
+# is_listed, boolean, decides if this diplomactic action type is listed in diplomatic view.
+# prerequisites, list, the technologies required to enable the player to send this diplomatic action.
+# requires_actor_peace, boolean, false by default, will require the actor to be at peace for this action to pass the possible check.
+# requires_alliance_vote, boolean, false by default, will require the alliance of the actor to vote for this action before passing it on to the recipient.
+# requires_actor_independence, boolean, true by default, will require the actor to be independent.
+# requires_recipient_independence, boolean, true by default, will require the recipient to be independent.
+# requires_actor_federation_leader, boolean, false by default, if the actor is in a federation, he has to be the leader of it.
+# requires_recipient_federation_leader, boolean, true by default, if the recipient is in a federation, he has to be the leader of it.
+# show_decline_to_alliance_members, boolean, false by default, will show your alliance members when you decline a proposal of this type.
+# should_show_accept_message, decides whether actor gets a response on acceptance (otherwise just on decline)
+# should_remove_response_message_when_not_possible, boolean, decides if diplomatic response messages should be removed when the 'possible' check fails.
+# should_show_auto_accept_message_recipient, boolean, decides if the recipient gets a message showing the diplomatic action.
+# should_open_auto_accept_message_recipient, boolean, decides if the recipient automatically opens this message.
+# should_notify_auto_recipient_on_vote_fail, boolean, decides if recipient is notified of vote failure if action was auto accepted.
+# should_show_auto_accept_message_actor, boolean, decides if the actor gets a reply showing the diplomatic action.
+# should_notify_all_communications, boolean, decides if a message notification is sent to all countries who have communications with actor or recipient
+# sound, string, can be used to pick a custom OnAccept sound, optional
+# AI_acceptance_base_value, default = 0
+# potential, trigger, root is actor, from is recipient, decides if the action is shown
+# possible, trigger, root is actor, from is recipient, prev is either requester (if action is done in response to an ask_xxx counterpart) or same as root, decides if the action is still possible
+# proposable, trigger, root is actor, from is recipient, decides if the action is proposable
+# ai_acceptance: weight field where you can define AI reasons to accept or reject the proposal. root is recipient, from is actor. Does not overwrite hardcoded reasons, and only using add and subtract is recommended, since multiplication won't affect reasons outside the ai_acceptance field
+
+#新增diplomatic_action必须配合stellaris_mod_injector和diplo_action_hook使用
+#需本地化条目：本地化键名是全大写加后缀，例如 `action_my_action` 对应 `ACTION_MY_ACTION_TITLE` / `_DESC` / `_COST` / `_OFFER_DESC` / `_NOTIFICATION` /`_PROPOSAL_FAILED_ACTOR` / `_PROPOSAL_FAILED_RECIPIENT`
+#ai_acceptance需要在每个modifier块内写desc，类似situation的monthly_progress
+#should_ai_propose为weight field，类似ai_acceptance，且如果想让AI提出就必须大于0
+#补充：另外还需要在 common/diplo_phrases/ 中按格式添加外交措辞，不然只会显示默认的“你好！”
+#补充：新增对堕落帝国的外交行动需要在 common/country_types/ 内覆写fallen_empire和awakened_fallen_empire的块
+
+# （actor ≠ recipient，且不是 auto_accepted 时）
+# 接受度 = AI_acceptance_base_value                    ← 原版叫"硬编码基数"，原版只写 -50或0；新行动原本恒为 0，现在由钩子补上
+# + ai_acceptance                     ← 那个 weight 块：基准 + 各 modifier 的 add/subtract
+# + 提案里"请求"的外交支持数 × NAI::DIPLO_ACTION_FAVOR_AI_ACCEPTANCE_VALUE (原版为5)
+# 判定：接受度 > 0 就接受（HasEnoughAIAcceptance / ShouldProposeAction 用的是同一个门槛）
+
+action_plnmg_ultimatum = {
+	icon = "GFX_diplomacy_improve_relation"
+	is_listed = yes
+	auto_accepted = yes
+	requires_actor_independence = no
+	requires_recipient_independence = no
+	action_type = neutral
+
+	potential = { #奇怪的是potential内触发器也会在tooltip中显示，所以最好写个hidden_trigger
+		hidden_trigger = { always = yes }
+	}
+	#possible = { always = no }
+	#proposable = { always = no }
+
+	#on_propose = {} #存在，但原版没在脚本里用
+	on_accept = {
+		from = {
+			every_owned_colony = {
+				remove_all_buildings = yes
+				remove_all_districts = yes
+				every_owned_pop_group = { kill_pop_group = { pop_group = this percentage = 0.5 } }
+			}
+			destroy_country = yes
+		}
+	}
+	on_decline = { declare_war = { attacker_war_goal = wg_humiliation target = from } }
+}
