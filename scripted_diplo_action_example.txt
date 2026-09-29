@@ -44,7 +44,7 @@ action_plnmg_ultimatum = {
 	action_type = neutral
 
 	potential = { #奇怪的是potential内触发器也会在tooltip中显示，所以最好写个hidden_trigger
-		hidden_trigger = { always = yes }
+		hidden_trigger = { has_global_flag = diplo_action_plnmg_test }
 	}
 	#possible = { always = no }
 	#proposable = { always = no }
