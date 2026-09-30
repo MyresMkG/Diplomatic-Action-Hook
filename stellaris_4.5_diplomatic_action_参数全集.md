@@ -172,17 +172,3 @@ action_my_action = {
 ```
 
 ---
-
-## 8. 复现方法
-
-全部结论可用仓库里 `analysis/diplo_hook/win_recon/` 的脚本重跑：
-
-| 脚本 | 用途 |
-| --- | --- |
-| `kdump.py A` | 从 exe 注册点恢复关键字表 → `kw_A.csv`（9990 条，无冲突；`0x35fc = diplo_view_acceptance_icon` 直接在注册点旁读到） |
-| `rm_dump.py A` + `readmember_A.txt` | `CDiplomaticActionType::ReadMember` 的带注释全反汇编（token → 字段/位） |
-| `flag_reads.py` → `flag_reads.txt` | 22 个布尔位各自的**全部读取点**（消费者函数名 + dump 行号） |
-| `vtcmp.py A` | 基类虚表 vs 64 张工厂虚表逐槽比对（用于确认虚表槽语义） |
-| `aa_probe.py / aa_probe3.py` | 找引用某字符串的函数、列直接调用 |
-
-Linux dump（`stellaris_4.5_source.cpp`）对应行号：`ReadMember` 2337976–2338273、`PostReadInit` 2338293、`GetScriptedAcceptance` 2980239、`ShouldUseScriptedAcceptance` 2337195、`IsPotential` 2333910、`IsPossible` 2333987、`ExecuteAccept` 2335383 起（调用 `Type::OnAccept` 2335432）。
