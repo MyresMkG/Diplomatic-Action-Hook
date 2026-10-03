@@ -79,6 +79,14 @@ int main(int argc, char** argv) {
   printf("  %-44s 0x%08x (%u slots: 0x%x, 0x%x)\n", "_purecall stub", r.purecall,
          r.pure_slot_count, r.pure_slots[0], r.pure_slots[1]);
   printf("  %-44s 0x%08x\n", "engine action copy helper", r.copy_fn);
+  printf("  %-44s 0x%x (inside the name object)\n", "action name data offset",
+         r.name_data_offset);
+  printf("  %-44s 0x%x (inside the action type)\n", "action name member offset",
+         r.name_member_offset);
+  printf("  %-44s 0x%x / 0x%x\n", "lexer counters (static/dynamic)",
+         r.lexer_static_offset, r.lexer_dynamic_offset);
+  printf("  %-44s 0x%x / 0x%x\n", "database entries/count offset",
+         r.db_entries_offset, r.db_count_offset);
   printf("%s\n", bad == 0 ? "ALL CHECKS PASSED" : "*** CHECKS FAILED ***");
   return bad == 0 ? 0 : 1;
 }

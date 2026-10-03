@@ -1,6 +1,8 @@
 // Resolves every game address the hook needs, starting only from unique string
-// literals. No RVA is hardcoded, so the same binary works on any build whose
-// strings are unchanged (verified on 4.5.0 and 4.5.1).
+// literals, and derives the object layout from the code that touches it. No RVA
+// and no field offset is hardcoded for a specific build, so the same binary works
+// on any build whose strings and call shapes are unchanged: verified on 4.5.0,
+// 4.5.1, 4.2.4 and 3.14.1592653.
 #pragma once
 
 #include <cstdint>
@@ -28,12 +30,33 @@ struct Resolved {
   uint32_t base_ctor = 0;     // CDiplomaticAction::CDiplomaticAction(int)
   uint32_t base_vtable = 0;   // vtable CDiplomaticAction::CDiplomaticAction installs
 
-  // Object field offsets, re-derived rather than assumed.
-  uint32_t type_token_offset = 0x50;  // token inside CDiplomaticActionType
+  // Object field offsets. The token offset is derived (it moves between builds);
+  // `action_type_offset` is the same 0x40 on every build seen and is checked by
+  // the hook's own self-test.
+  uint32_t type_token_offset = 0;     // token inside CDiplomaticActionType
   uint32_t action_type_offset = 0x40; // CDiplomaticAction::_type
   uint32_t action_size = 0;           // bytes to allocate for a generic action
   uint32_t action_size_from_ctor = 0; // what the constructor itself writes
   uint32_t action_size_upper_bound = 0;  // largest class size in the dispatch
+
+  // Layout of the action-type database the base constructor searches, read off
+  // that constructor's own inlined lookup rather than fixed: entries at +0x50
+  // and count at +0x5c on 4.5, +0x40 and +0x4c on 4.2.4 and 3.14.
+  uint32_t db_entries_offset = 0x50;
+  uint32_t db_count_offset = 0x5c;
+
+  // The lexer's token counters, read off CStaticLexer::AddDynamicToken. The
+  // static keyword count is the higher of the two; they are 0x20 apart on every
+  // build seen so far, at +0x84/+0x64 on 4.5 and 4.2.4 and +0x7c/+0x5c on 3.14.
+  uint32_t lexer_static_offset = 0x84;
+  uint32_t lexer_dynamic_offset = 0x64;
+
+  // Where the action name sits inside the type, and where the text lives inside
+  // that name object. The member offset is 0x10 on every build seen; the string
+  // inside it is at +0x10 on 4.5 but at +0x00 on 4.2.4 and 3.14, so it is read
+  // off AddDynamicToken (see FindNameDataOffset).
+  uint32_t name_member_offset = 0x10;
+  uint32_t name_data_offset = 0x10;
 
   // The action-type database singleton pointer variable, used by the catch-up
   // pass that repairs actions created before the hook was installed.

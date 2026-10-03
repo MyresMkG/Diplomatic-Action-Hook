@@ -89,7 +89,8 @@ bool SafeReadableText(const char* p) {  MEMORY_BASIC_INFORMATION mbi;
 
 const char* CStringText(const void* cstring) {
   if (cstring == nullptr) return "";
-  const uint8_t* base = static_cast<const uint8_t*>(cstring) + 0x10;
+  const uint8_t* base =
+      static_cast<const uint8_t*>(cstring) + g_resolved.name_data_offset;
   if (!Readable(base, 0x20)) return "<unreadable>";
   uint64_t capacity = 0;
   memcpy(&capacity, base + 0x18, 8);
@@ -107,7 +108,8 @@ const char* CStringText(const void* cstring) {
 // registered as keywords.
 bool CStringLength(const void* cstring, uint64_t* length) {
   if (cstring == nullptr) return false;
-  const uint8_t* base = static_cast<const uint8_t*>(cstring) + 0x10;
+  const uint8_t* base =
+      static_cast<const uint8_t*>(cstring) + g_resolved.name_data_offset;
   if (!Readable(base, 0x20)) return false;
   memcpy(length, base + 0x10, 8);
   return *length < 0x10000;
@@ -230,7 +232,7 @@ const char* __fastcall OurGetLocName(void* self) {
   std::lock_guard<std::mutex> lock(g_mutex);
   auto it = g_loc_names.find(type);
   if (it != g_loc_names.end()) return it->second.c_str();
-  std::string name = CStringText(static_cast<uint8_t*>(type) + 0x10);
+  std::string name = CStringText(static_cast<uint8_t*>(type) + g_resolved.name_member_offset);
   for (char& c : name) {
     if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
   }
@@ -353,7 +355,7 @@ bool Readable(const void* p, size_t size) {
 // The name of an action type lives in a CString member at +0x10, whose inner
 // std::string is the MSVC layout; CStringText already knows both offsets.
 const char* TypeName(void* type) {
-  return CStringText(static_cast<uint8_t*>(type) + 0x10);
+  return CStringText(static_cast<uint8_t*>(type) + g_resolved.name_member_offset);
 }
 
 // The token a scripted action name resolved to is baked in at construction time.
@@ -379,14 +381,17 @@ bool CatchUpExistingTypes() {
         "handle every entry as it is loaded");
     return false;
   }
-  if (!Readable(static_cast<uint8_t*>(db) + 0x50, 0x10)) {
+  const uint32_t entries_off = g_resolved.db_entries_offset;
+  const uint32_t count_off = g_resolved.db_count_offset;
+  if (!Readable(static_cast<uint8_t*>(db) + entries_off, 8) ||
+      !Readable(static_cast<uint8_t*>(db) + count_off, 4)) {
     Log("catch-up: action database is not readable; skipped");
     return false;
   }
   uint32_t count = 0;
   void** entries = nullptr;
-  memcpy(&count, static_cast<uint8_t*>(db) + 0x5c, 4);
-  memcpy(&entries, static_cast<uint8_t*>(db) + 0x50, 8);
+  memcpy(&count, static_cast<uint8_t*>(db) + count_off, 4);
+  memcpy(&entries, static_cast<uint8_t*>(db) + entries_off, 8);
   if (count == 0 || count > 100000 || !Readable(entries, count * sizeof(void*))) {
     Log("catch-up: implausible action database (count=%u); skipped", count);
     return false;
@@ -408,7 +413,7 @@ bool CatchUpExistingTypes() {
     }
     // Skip the engine's empty placeholder (the null object); it keeps 0xc.
     uint64_t name_length = 0;
-    if (!CStringLength(static_cast<uint8_t*>(type) + 0x10, &name_length) ||
+    if (!CStringLength(static_cast<uint8_t*>(type) + g_resolved.name_member_offset, &name_length) ||
         name_length == 0) {
       continue;
     }
@@ -417,7 +422,7 @@ bool CatchUpExistingTypes() {
     {
       // Serialised with hook 1: see g_lexer_mutex.
       std::lock_guard<std::mutex> lexer_lock(g_lexer_mutex);
-      fresh = g_add_dynamic_token(static_cast<uint8_t*>(type) + 0x10, true);
+      fresh = g_add_dynamic_token(static_cast<uint8_t*>(type) + g_resolved.name_member_offset, true);
     }
     if (fresh <= 0) {
       Log("catch-up: could not register '%s'", name);
@@ -440,12 +445,13 @@ bool CatchUpExistingTypes() {
   return true;
 }
 
-// The offset of `AI_acceptance_base_value` inside the action type is the one this
-// build's layout was verified against, and it stays distrusted until the database
-// agrees with that: the base game leaves the field at 0 for most actions and uses
-// a small negative number (-50) for the rest, so a wrong offset would show up as
-// a field that is almost never zero, or as values far outside that range. Only
-// stock types are counted -- a mod may write anything into its own action.
+// `AI_acceptance_base_value` is a plain int in the action type, and its offset is
+// derived (see kAcceptanceBaseDelta) rather than written down, but it stays
+// distrusted until the database agrees with it: the base game leaves the field at
+// 0 for most actions and uses a small negative number (-50) for the rest, so a
+// wrong offset would show up as a field that is almost never zero, or as values
+// far outside that range. Only stock types are counted -- a mod may write
+// anything into its own action.
 bool CheckAcceptanceBaseField() {
   if (!g_resolved.ok || g_resolved.db_instance_ptr == 0 ||
       g_resolved.ai_acceptance_base_offset == 0) {
@@ -454,11 +460,16 @@ bool CheckAcceptanceBaseField() {
   void* db = nullptr;
   if (!Readable(At<const void*>(g_resolved.db_instance_ptr), sizeof(void*))) return false;
   memcpy(&db, At<const void*>(g_resolved.db_instance_ptr), sizeof(void*));
-  if (db == nullptr || !Readable(static_cast<uint8_t*>(db) + 0x50, 0x10)) return false;
+  const uint32_t entries_off = g_resolved.db_entries_offset;
+  const uint32_t count_off = g_resolved.db_count_offset;
+  if (db == nullptr || !Readable(static_cast<uint8_t*>(db) + entries_off, 8) ||
+      !Readable(static_cast<uint8_t*>(db) + count_off, 4)) {
+    return false;
+  }
   uint32_t count = 0;
   void** entries = nullptr;
-  memcpy(&count, static_cast<uint8_t*>(db) + 0x5c, 4);
-  memcpy(&entries, static_cast<uint8_t*>(db) + 0x50, 8);
+  memcpy(&count, static_cast<uint8_t*>(db) + count_off, 4);
+  memcpy(&entries, static_cast<uint8_t*>(db) + entries_off, 8);
   if (count == 0 || count > 100000 || !Readable(entries, count * sizeof(void*))) return false;
 
   uint32_t inspected = 0;
@@ -696,6 +707,13 @@ bool ResolveOnly() {
   Log("  CDiplomaticAction vtable                     rva 0x%08x", g_resolved.base_vtable);
   Log("  action type database pointer variable        rva 0x%08x",
       g_resolved.db_instance_ptr);
+  Log("  layout: action type token +0x%x, database entries +0x%x count +0x%x",
+      g_resolved.type_token_offset, g_resolved.db_entries_offset,
+      g_resolved.db_count_offset);
+  Log("  layout: lexer counters +0x%x static / +0x%x dynamic",
+      g_resolved.lexer_static_offset, g_resolved.lexer_dynamic_offset);
+  Log("  layout: action name at type +0x%x, string inside it +0x%x",
+      g_resolved.name_member_offset, g_resolved.name_data_offset);
   if (g_resolved.ai_propose_slot != 0) {
     Log("  CDiplomaticAction::ScriptedShouldAIPropose   rva 0x%08x",
         g_resolved.scripted_ai_propose);
@@ -710,8 +728,8 @@ bool ResolveOnly() {
         g_resolved.scripted_acceptance);
     Log("  GetAIAcceptance                              rva 0x%08x",
         g_resolved.get_ai_acceptance);
-    Log("  AI_acceptance_base_value field               +0x%x (verified layout, the "
-        "database re-checks it)", g_resolved.ai_acceptance_base_offset);
+    Log("  AI_acceptance_base_value field               +0x%x (derived from the token "
+        "offset; the database re-checks it)", g_resolved.ai_acceptance_base_offset);
   } else {
     Log("  AI acceptance scorer                         not found (%s)",
         g_resolved.ai_acceptance_failure);
